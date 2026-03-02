@@ -4318,3 +4318,86 @@ class TestDoNotUseDeprecatedAsyncioIscoroutinefunction(pylint.testutils.CheckerT
         with self.assertNoMessages():
             self.checker.visit_call(call_node1)
             self.checker.visit_call(call_node2)
+
+
+class TestClassVarAnnotationRequired(pylint.testutils.CheckerTestCase):
+    """Test that class-level variables are annotated with typing.ClassVar."""
+    CHECKER_CLASS = checker.ClassVarAnnotationRequired
+
+    @pytest.fixture(scope="class")
+    def setup(self):
+        file = open(
+            os.path.join(TEST_FOLDER, "test_files", "class_var_missing_classvar_annotation.py")
+        )
+        node = astroid.parse(file.read())
+        file.close()
+        return node
+
+    def test_violation_plain_assign(self, setup):
+        """Class-level plain assignment without any annotation should be flagged."""
+        # MyClient has: MAX_RETRIES=3 (plain assign), DEFAULT_TIMEOUT: int=30,
+        # name: str="default", endpoint: Optional[str]=None
+        class_node = setup.body[1]  # MyClient
+
+        with self.assertAddsMessages(
+            pylint.testutils.MessageTest(
+                msg_id="class-var-missing-classvar-annotation",
+                node=class_node.body[0],  # MAX_RETRIES = 3
+            ),
+            pylint.testutils.MessageTest(
+                msg_id="class-var-missing-classvar-annotation",
+                node=class_node.body[1],  # DEFAULT_TIMEOUT: int = 30
+            ),
+            pylint.testutils.MessageTest(
+                msg_id="class-var-missing-classvar-annotation",
+                node=class_node.body[2],  # name: str = "default"
+            ),
+            pylint.testutils.MessageTest(
+                msg_id="class-var-missing-classvar-annotation",
+                node=class_node.body[3],  # endpoint: Optional[str] = None
+            ),
+            ignore_position=True,
+        ):
+            self.checker.visit_classdef(class_node)
+
+    def test_violation_annotated_without_classvar(self, setup):
+        """Class-level annotated assignment without ClassVar should be flagged."""
+        # SomeModel: DELIMITER = "," and count: int = 0
+        class_node = setup.body[2]  # SomeModel
+
+        with self.assertAddsMessages(
+            pylint.testutils.MessageTest(
+                msg_id="class-var-missing-classvar-annotation",
+                node=class_node.body[0],  # DELIMITER = ","
+            ),
+            pylint.testutils.MessageTest(
+                msg_id="class-var-missing-classvar-annotation",
+                node=class_node.body[1],  # count: int = 0
+            ),
+            ignore_position=True,
+        ):
+            self.checker.visit_classdef(class_node)
+
+    def test_acceptable_classvar_annotated(self, setup):
+        """Class variables properly annotated with ClassVar should not be flagged."""
+        # GoodClient with ClassVar annotations, private vars, dunders
+        class_node = setup.body[3]  # GoodClient
+
+        with self.assertNoMessages():
+            self.checker.visit_classdef(class_node)
+
+    def test_acceptable_private_class(self, setup):
+        """Private classes (starting with _) should not be checked."""
+        # _InternalModel
+        class_node = setup.body[4]  # _InternalModel
+
+        with self.assertNoMessages():
+            self.checker.visit_classdef(class_node)
+
+    def test_acceptable_another_good_model(self, setup):
+        """Another class with proper ClassVar usage and private vars should not be flagged."""
+        # AlsoGoodModel
+        class_node = setup.body[5]  # AlsoGoodModel
+
+        with self.assertNoMessages():
+            self.checker.visit_classdef(class_node)

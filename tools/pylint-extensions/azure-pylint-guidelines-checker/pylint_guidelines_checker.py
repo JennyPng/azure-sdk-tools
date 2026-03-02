@@ -4,7 +4,7 @@
 # ------------------------------------
 
 """
-Pylint custom checkers for SDK guidelines: C4717 - C4773
+Pylint custom checkers for SDK guidelines: C4717 - C4775
 """
 import os
 import logging
@@ -3507,6 +3507,115 @@ class DoNotUseLoggingException(BaseChecker):
                 node=node,
                 confidence=None,
             )
+
+
+class ClassVarAnnotationRequired(BaseChecker):
+    """Rule to check that class-level variables are annotated with typing.ClassVar.
+    This ensures APIView can correctly distinguish class variables from instance variables.
+    """
+
+    name = "class-var-annotation-required"
+    priority = -1
+    msgs = {
+        "C4775": (
+            "Class variable must be annotated with typing.ClassVar. "
+            "ClassVar is required to distinguish class variables from instance variables in APIView.",
+            "class-var-missing-classvar-annotation",
+            "Class variables should be annotated with ClassVar to distinguish them from instance variables.",
+        ),
+    }
+    options = (
+        (
+            "ignore-class-var-missing-classvar-annotation",
+            {
+                "default": False,
+                "type": "yn",
+                "metavar": "<y_or_n>",
+                "help": "Allow class variables without ClassVar annotation.",
+            },
+        ),
+    )
+
+    DUNDER_NAMES = {
+        "__slots__",
+        "__doc__",
+        "__dict__",
+        "__weakref__",
+        "__abstractmethods__",
+        "__module__",
+        "__qualname__",
+    }
+
+    def __init__(self, linter=None):
+        super().__init__(linter)
+        self.namespace = None
+
+    def visit_module(self, node):
+        self.namespace = node.name
+
+    def visit_classdef(self, node):
+        """Visit every class definition and check that class-level variables
+        are annotated with ClassVar.
+
+        :param node: class node
+        :type node: ast.ClassDef
+        :return: None
+        """
+        try:
+            if self.linter.config.ignore_class_var_missing_classvar_annotation:
+                return
+        except AttributeError:
+            pass
+
+        # Skip private/internal classes and internal modules
+        if node.name.startswith("_"):
+            return
+        if self.namespace and "._" in self.namespace:
+            return
+
+        for child in node.body:
+            if isinstance(child, astroid.Assign):
+                # Plain assignment at class level (no annotation at all)
+                for target in child.targets:
+                    name = getattr(target, "name", None)
+                    if name and not name.startswith("_") and name not in self.DUNDER_NAMES:
+                        self.add_message(
+                            msgid="class-var-missing-classvar-annotation",
+                            node=child,
+                            confidence=None,
+                        )
+            elif isinstance(child, astroid.AnnAssign):
+                # Annotated assignment — check if ClassVar is used
+                target = child.target
+                name = getattr(target, "name", None)
+                if name and not name.startswith("_") and name not in self.DUNDER_NAMES:
+                    if not self._is_classvar(child.annotation):
+                        self.add_message(
+                            msgid="class-var-missing-classvar-annotation",
+                            node=child,
+                            confidence=None,
+                        )
+
+    @staticmethod
+    def _is_classvar(annotation):
+        """Check if annotation is or contains ClassVar.
+
+        Handles:
+          - ClassVar[str]
+          - typing.ClassVar[str]
+          - ClassVar (bare, without subscript)
+        """
+        if annotation is None:
+            return False
+        if isinstance(annotation, astroid.Subscript):
+            return ClassVarAnnotationRequired._is_classvar(annotation.value)
+        if isinstance(annotation, astroid.Name):
+            return annotation.name == "ClassVar"
+        if isinstance(annotation, astroid.Attribute):
+            return annotation.attrname == "ClassVar"
+        return False
+
+
 # if a linter is registered in this function then it will be checked with pylint
 def register(linter):
     linter.register_checker(ClientsDoNotUseStaticMethods(linter))
@@ -3560,3 +3669,4 @@ def register(linter):
     # linter.register_checker(ClientLROMethodsUseCorrectNaming(linter))
     linter.register_checker(DoNotUseLoggingException(linter))
     linter.register_checker(DoNotStoreSecretsInTestVariables(linter))
+    linter.register_checker(ClassVarAnnotationRequired(linter))
