@@ -4447,3 +4447,126 @@ class TestDoNotUseLoggingDirectly(pylint.testutils.CheckerTestCase):
         
         with self.assertNoMessages():
             self.checker.visit_call(call_node)
+
+
+class TestClassVarAnnotationChecker(pylint.testutils.CheckerTestCase):
+    """Test that class variables in client classes are annotated with ClassVar."""
+
+    CHECKER_CLASS = checker.ClassVarAnnotationChecker
+
+    @pytest.fixture(scope="class")
+    def setup(self):
+        with open(
+            os.path.join(TEST_FOLDER, "test_files", "class_var_annotation.py")
+        ) as file:
+            node = astroid.parse(file.read())
+        return node
+
+    def test_flags_plain_assignment_without_classvar(self, setup):
+        """Test that plain class var assignment (MAX_RETRIES = 3) is flagged."""
+        # GoodClient is setup.body[1] (after import)
+        class_node = setup.body[1]
+        assert class_node.name == "GoodClient"
+        # MAX_RETRIES = 3 and DEFAULT_TIMEOUT = 30 should be flagged
+        with self.assertAddsMessages(
+            pylint.testutils.MessageTest(
+                msg_id="class-var-missing-classvar",
+                node=class_node.body[0],
+                args=("MAX_RETRIES",),
+            ),
+            pylint.testutils.MessageTest(
+                msg_id="class-var-missing-classvar",
+                node=class_node.body[1],
+                args=("DEFAULT_TIMEOUT",),
+            ),
+            ignore_position=True,
+        ):
+            self.checker.visit_classdef(class_node)
+
+    def test_flags_annotated_without_classvar(self, setup):
+        """Test that annotated class var without ClassVar (MAX_RETRIES: int = 3) is flagged."""
+        # AnotherClient is setup.body[2]
+        class_node = setup.body[2]
+        assert class_node.name == "AnotherClient"
+        with self.assertAddsMessages(
+            pylint.testutils.MessageTest(
+                msg_id="class-var-missing-classvar",
+                node=class_node.body[0],
+                args=("MAX_RETRIES",),
+            ),
+            pylint.testutils.MessageTest(
+                msg_id="class-var-missing-classvar",
+                node=class_node.body[1],
+                args=("DEFAULT_TIMEOUT",),
+            ),
+            pylint.testutils.MessageTest(
+                msg_id="class-var-missing-classvar",
+                node=class_node.body[2],
+                args=("SOME_LIST",),
+            ),
+            ignore_position=True,
+        ):
+            self.checker.visit_classdef(class_node)
+
+    def test_flags_optional_without_classvar(self, setup):
+        """Test that Optional annotation without ClassVar is flagged."""
+        # YetAnotherClient is setup.body[3]
+        class_node = setup.body[3]
+        assert class_node.name == "YetAnotherClient"
+        with self.assertAddsMessages(
+            pylint.testutils.MessageTest(
+                msg_id="class-var-missing-classvar",
+                node=class_node.body[0],
+                args=("OPTIONAL_SETTING",),
+            ),
+            ignore_position=True,
+        ):
+            self.checker.visit_classdef(class_node)
+
+    def test_allows_classvar_annotated(self, setup):
+        """Test that ClassVar annotated variables are NOT flagged."""
+        # ProperClient is setup.body[4]
+        class_node = setup.body[4]
+        assert class_node.name == "ProperClient"
+        with self.assertNoMessages():
+            self.checker.visit_classdef(class_node)
+
+    def test_allows_non_client_class(self, setup):
+        """Test that non-client classes are NOT checked."""
+        # NonClientClass is setup.body[6]
+        class_node = setup.body[6]
+        assert class_node.name == "NonClientClass"
+        with self.assertNoMessages():
+            self.checker.visit_classdef(class_node)
+
+    def test_allows_private_client(self, setup):
+        """Test that private client classes are NOT checked."""
+        # _PrivateClient is setup.body[7]
+        class_node = setup.body[7]
+        assert class_node.name == "_PrivateClient"
+        with self.assertNoMessages():
+            self.checker.visit_classdef(class_node)
+
+    def test_skips_dunder_attributes(self, setup):
+        """Test that dunder attributes (__slots__, __doc__) are NOT flagged."""
+        # DunderClient is setup.body[9]
+        class_node = setup.body[9]
+        assert class_node.name == "DunderClient"
+        # Only MAX_RETRIES should be flagged, not __slots__ or __doc__
+        with self.assertAddsMessages(
+            pylint.testutils.MessageTest(
+                msg_id="class-var-missing-classvar",
+                node=class_node.body[2],
+                args=("MAX_RETRIES",),
+            ),
+            ignore_position=True,
+        ):
+            self.checker.visit_classdef(class_node)
+
+    def test_allows_client_with_no_class_vars(self, setup):
+        """Test that a client with only methods is NOT flagged."""
+        # MethodOnlyClient is setup.body[10]
+        class_node = setup.body[10]
+        assert class_node.name == "MethodOnlyClient"
+        with self.assertNoMessages():
+            self.checker.visit_classdef(class_node)

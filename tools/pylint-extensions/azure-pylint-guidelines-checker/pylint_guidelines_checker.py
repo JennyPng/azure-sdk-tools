@@ -4,7 +4,7 @@
 # ------------------------------------
 
 """
-Pylint custom checkers for SDK guidelines: C4717 - C4775
+Pylint custom checkers for SDK guidelines: C4717 - C4776
 """
 import os
 import logging
@@ -3586,6 +3586,100 @@ class DoNotUseLoggingDirectly(BaseChecker):
                 confidence=None,
             )
             
+
+class ClassVarAnnotationChecker(BaseChecker):
+    """Rule to check that class variables in client classes are annotated with ClassVar."""
+
+    name = "class-var-annotation"
+    priority = -1
+    msgs = {
+        "C4776": (
+            "Class variable '%s' should be annotated with typing.ClassVar. "
+            "See details: https://azure.github.io/azure-sdk/python_design.html",
+            "class-var-missing-classvar",
+            "All class variables in client classes should be annotated with ClassVar "
+            "to distinguish them from instance variables in APIView.",
+        ),
+    }
+
+    ignore_clients = [
+        "PipelineClient",
+        "AsyncPipelineClient",
+        "ARMPipelineClient",
+        "AsyncARMPipelineClient",
+    ]
+
+    def __init__(self, linter=None):
+        super().__init__(linter)
+
+    def _is_classvar_annotation(self, annotation):
+        """Check whether an annotation node represents a ClassVar type."""
+        if annotation is None:
+            return False
+        # ClassVar[X] appears as a Subscript node with ClassVar as the value
+        if isinstance(annotation, astroid.Subscript):
+            return self._is_classvar_name(annotation.value)
+        # Bare ClassVar (without subscript)
+        return self._is_classvar_name(annotation)
+
+    def _is_classvar_name(self, node):
+        """Check if a node refers to ClassVar."""
+        if isinstance(node, astroid.Name):
+            return node.name == "ClassVar"
+        if isinstance(node, astroid.Attribute):
+            return node.attrname == "ClassVar"
+        return False
+
+    def visit_classdef(self, node):
+        """Visit class definitions and check that class variables use ClassVar."""
+        try:
+            # Only check classes ending in "Client"
+            if not node.name.endswith("Client"):
+                return
+            # Ignore private classes
+            if node.name.startswith("_"):
+                return
+            # Ignore known framework clients
+            if node.name in self.ignore_clients:
+                return
+
+            for child in node.body:
+                # Check plain assignments: e.g. MAX_RETRIES = 3
+                if isinstance(child, astroid.Assign):
+                    for target in child.targets:
+                        if isinstance(target, astroid.AssignName):
+                            name = target.name
+                            # Skip dunder and private attributes
+                            if name.startswith("_"):
+                                continue
+                            self.add_message(
+                                msgid="class-var-missing-classvar",
+                                node=child,
+                                args=(name,),
+                                confidence=None,
+                            )
+
+                # Check annotated assignments without ClassVar: e.g. MAX_RETRIES: int = 3
+                elif isinstance(child, astroid.AnnAssign):
+                    if child.target and isinstance(child.target, astroid.AssignName):
+                        name = child.target.name
+                        # Skip dunder and private attributes
+                        if name.startswith("_"):
+                            continue
+                        if not self._is_classvar_annotation(child.annotation):
+                            self.add_message(
+                                msgid="class-var-missing-classvar",
+                                node=child,
+                                args=(name,),
+                                confidence=None,
+                            )
+        except AttributeError:
+            logger.debug(
+                "Pylint custom checker failed to check ClassVar annotation."
+            )
+            pass
+
+
 # if a linter is registered in this function then it will be checked with pylint
 def register(linter):
     linter.register_checker(ClientsDoNotUseStaticMethods(linter))
@@ -3640,3 +3734,4 @@ def register(linter):
     linter.register_checker(DoNotUseLoggingException(linter))
     linter.register_checker(DoNotStoreSecretsInTestVariables(linter))
     linter.register_checker(DoNotUseLoggingDirectly(linter))
+    linter.register_checker(ClassVarAnnotationChecker(linter))

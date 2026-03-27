@@ -4,6 +4,7 @@
 - Add `do-not-store-secrets-in-test-variables` check
 - Add `remove-deprecated-iscoroutinefunction` check
 - Add `do-not-use-logging-directly` check
+- Add `class-var-missing-classvar` check to ensure class variables use ClassVar annotation
 
 ## 0.5.7 (2025-07-15)
 - Bug fix for `do-not-use-logging-exception` checker
