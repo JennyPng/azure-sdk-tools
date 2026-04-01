@@ -81,7 +81,7 @@ def function_foo(x):
 # test_docstring_raises
 def function_foo():
     """
-    :raises: ValueError
+    :raises ValueError: hello
     """
     print("hello")
     raise ValueError("hello")
@@ -128,3 +128,22 @@ def function_foo() -> NoReturn:
     This function never returns.
     """
     raise ValueError("This function never returns")
+
+
+# test_docstring_raises_invalid_format
+def function_foo():
+    """
+    :raises: DeserializationError if something went wrong
+    """
+    print("hello")
+    raise ValueError("hello")
+
+
+# test_docstring_raises_multiple_valid
+def function_foo():
+    """
+    :raises ValueError: if the message_body exceeds 160 characters
+    :raises TypeError: if the message_body is not a basestring
+    """
+    print("hello")
+    raise ValueError("hello")

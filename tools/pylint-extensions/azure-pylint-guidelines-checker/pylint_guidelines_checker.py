@@ -4,10 +4,11 @@
 # ------------------------------------
 
 """
-Pylint custom checkers for SDK guidelines: C4717 - C4776
+Pylint custom checkers for SDK guidelines: C4717 - C4777
 """
 
 import os
+import re
 import logging
 import astroid
 from pylint.checkers import BaseChecker
@@ -1486,6 +1487,7 @@ class ServiceClientUsesNameWithClientSuffix(BaseChecker):
 class CheckDocstringParameters(BaseChecker):
     name = "check-docstrings"
     priority = -1
+    raises_format = re.compile(r"^:raises\s+[^:]+:\s*.*$")
     msgs = {
         "C4739": (
             'Params missing in docstring: "%s". See details: '
@@ -1528,6 +1530,12 @@ class CheckDocstringParameters(BaseChecker):
             "https://azure.github.io/azure-sdk/python_documentation.html#docstrings",
             "docstring-type-do-not-use-class",
             "Docstring type is formatted incorrectly. Do not use `:class` in docstring type.",
+        ),
+        "C4777": (
+            "Raises doc is formatted incorrectly. Use ':raises ErrorType: description'. See details: "
+            "https://azure.github.io/azure-sdk/python_documentation.html#docstrings",
+            "docstring-raises-wrong-format",
+            "Docstring raises entry is formatted incorrectly.",
         ),
     }
     options = (
@@ -1623,6 +1631,25 @@ class CheckDocstringParameters(BaseChecker):
                 docparams[param] = docstring[idx + 1]
 
         return docparams
+
+    def check_raises(self, node):
+        try:
+            docstring_lines = node.doc_node.value.splitlines()
+        except AttributeError:
+            return
+
+        for line in docstring_lines:
+            stripped_line = line.strip()
+            if not stripped_line.startswith(":raises"):
+                continue
+
+            if not self.raises_format.match(stripped_line):
+                self.add_message(
+                    msgid="docstring-raises-wrong-format",
+                    node=node,
+                    confidence=None,
+                )
+                return
 
     def check_parameters(self, node):
         """Parse the docstring for any params and types
@@ -1860,6 +1887,7 @@ class CheckDocstringParameters(BaseChecker):
             if node.name == "__init__":
                 return
             self.check_parameters(node)
+            self.check_raises(node)
             self.check_return(node)
         except Exception:
             logger.debug("Pylint custom checker failed to check docstrings.")

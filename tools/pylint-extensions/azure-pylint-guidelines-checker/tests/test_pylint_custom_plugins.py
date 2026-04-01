@@ -3142,6 +3142,26 @@ class TestDocstringParameters(pylint.testutils.CheckerTestCase):
         with self.assertNoMessages():
             self.checker.visit_functiondef(node)
 
+    def test_docstring_raises_invalid_format(self, setup):
+        node = setup.body[14]
+        with self.assertAddsMessages(
+            pylint.testutils.MessageTest(
+                msg_id="docstring-raises-wrong-format",
+                line=134,
+                args=None,
+                node=node,
+                col_offset=0,
+                end_line=134,
+                end_col_offset=16,
+            ),
+        ):
+            self.checker.visit_functiondef(node)
+
+    def test_docstring_raises_multiple_valid(self, setup):
+        node = setup.body[15]
+        with self.assertNoMessages():
+            self.checker.visit_functiondef(node)
+
 
 class TestDoNotImportLegacySix(pylint.testutils.CheckerTestCase):
     """Test that we are blocking disallowed imports and allowing allowed imports."""
