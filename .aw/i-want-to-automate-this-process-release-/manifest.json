@@ -1,0 +1,6 @@
+{
+  "apispec": {
+    "required": false,
+    "reason": "Task involves automating existing release management workflows (release notes PR merging, release data updates) using existing internal APIs and processes, not defining new external API contracts."
+  }
+}
