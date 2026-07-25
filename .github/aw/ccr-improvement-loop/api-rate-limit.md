@@ -4,8 +4,7 @@ A consolidated reference for everything we've explored about GitHub API rate
 limits in this workflow: where the pressure comes from, how GitHub meters us,
 what we've already shipped, and how to scale backfill across many repos.
 
-Companion doc: [`optimize-api-call-plan.md`](./optimize-api-call-plan.md) tracks
-the concrete optimization items (#1–#5) and their status.
+Section 5 below tracks the concrete optimization items (#1–#5) and their status.
 
 ---
 
@@ -82,9 +81,9 @@ the **default Actions `GITHUB_TOKEN`** — a gap that sets the real ceiling.
 
 Source: [GitHub REST API rate-limit docs](https://docs.github.com/enterprise-cloud@latest/rest/overview/rate-limits-for-the-rest-api).
 
-Because the workflow repo (`gh-aw-trial`) is **personal**, the effective ceiling
-is **~1,000 req/hr** — consistent with runs failing at ~70 PRs (~1,000 calls).
-**This is the single highest-leverage variable for scale.**
+Because a **personal** workflow repo caps the shared installation budget, the
+effective ceiling is **~1,000 req/hr** — consistent with runs failing at ~70 PRs
+(~1,000 calls). **This is the single highest-leverage variable for scale.**
 
 ---
 
@@ -143,7 +142,7 @@ target repo draws from it. Four independent levers:
 
 - **#3 selective commit-detail:** fetch `commits/{sha}` only where needed —
   shrinks the dominant `N` term. (Deferred; blocked by a `distinctFiles`
-  coupling — see `optimize-api-call-plan.md`.)
+  coupling.)
 - **#4 GraphQL migration:** move reviews/comments/threads onto the **separate
   GraphQL point budget** — effectively a _second_ pool, ~doubling capacity.
   Per-commit patches stay on REST. (Deferred; connections still paginate.)
@@ -174,8 +173,6 @@ idempotent and resumable.
 ---
 
 ## 5. What we've already shipped
-
-See `optimize-api-call-plan.md` for details and test coverage.
 
 - **#1 — Deleted the unused `commits/{sha}/pulls` call + `commitPrs` field.**
   Written but never read; per-PR cost `6+2N` → `6+N`.

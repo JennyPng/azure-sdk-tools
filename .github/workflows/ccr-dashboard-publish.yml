@@ -1,13 +1,17 @@
-# CCR dashboard publish (DORMANT / opt-in).
+# CCR dashboard publish (ACTIVE).
 #
 # Purpose: commit the read-only CCR Improvement Loop's run JSON into the committed
 # dashboard data folder so GitHub Pages can serve up-to-date trends. This keeps the
 # agentic loop itself read-only — publishing is a separate, plain (non-agent)
 # workflow.
 #
-# STATUS: dormant. It only triggers on manual `workflow_dispatch`, so it does NOT
-# run on its own this iteration. To activate later, uncomment the `workflow_run`
-# (or `schedule`) block below AND resolve the TODO(activate) artifact name.
+# STATUS: active. Runs automatically after each successful "CCR Improvement Loop"
+# run (workflow_run) and commits fresh run-*.json to the default branch; the
+# "tools - ccr-dashboard-pages" workflow then auto-deploys the updated dashboard.
+# Also runnable manually via workflow_dispatch.
+#
+# NOTE: workflow_run + push-to-default-branch only take effect once these
+# workflows are committed to the repository's DEFAULT branch.
 #
 # Token: same-repo publish uses the built-in GITHUB_TOKEN (contents: write). No
 # PAT / GitHub App / deploy key is required.
@@ -15,14 +19,11 @@ name: "tools - ccr-dashboard-publish"
 
 on:
   workflow_dispatch: {}
-  # TODO(activate): to auto-publish after each loop run, uncomment this block.
-  # It runs when the "CCR Improvement Loop" workflow completes successfully.
-  # workflow_run:
-  #   workflows: ["CCR Improvement Loop"]
-  #   types: [completed]
-  # Alternatively, a fixed weekly schedule:
-  # schedule:
-  #   - cron: "0 12 * * 1"
+  # Auto-publish after each loop run: fires when "CCR Improvement Loop"
+  # completes. The job below only proceeds on a successful conclusion.
+  workflow_run:
+    workflows: ["CCR Improvement Loop"]
+    types: [completed]
 
 permissions:
   contents: write
@@ -46,18 +47,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Download run JSON artifact from the loop
+      - name: Download run JSON artifact(s) from the loop
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          # TODO(activate): set this to the exact artifact name the gh-aw
-          # `upload_artifact` safe-output publishes the run JSON under (read it off
-          # a real "CCR Improvement Loop" run — the loop stages run-*.json via a
-          # safe-outputs upload). Until then this workflow is dormant.
-          name: ccr-runs
+          # No `name`: gh-aw uploads run-*.json under a dynamic artifact name, so
+          # pull EVERY artifact from the triggering loop run and let the copy step
+          # below find run-*.json wherever it landed. On workflow_run, run-id +
+          # token point at the loop run; on manual dispatch both are empty (no
+          # source run) and this simply downloads nothing.
           path: ${{ runner.temp }}/ccr-runs
-          # When activated via workflow_run, pull the artifact from that run:
-          # run-id: ${{ github.event.workflow_run.id }}
-          # github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
         continue-on-error: true
 
       - name: Copy run JSON into the committed data folder

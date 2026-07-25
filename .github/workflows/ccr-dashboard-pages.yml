@@ -1,13 +1,20 @@
-# CCR dashboard — one-shot GitHub Pages deploy (manual).
+# CCR dashboard — GitHub Pages deploy.
 #
-# Quick, share-a-link deploy of the CURRENT committed static dashboard. Run it
-# manually (Actions -> "tools - ccr-dashboard-pages" -> Run workflow). It publishes
-# whatever is committed under the dashboard/ folder as-is. Not a long-term / auto
-# solution — just a snapshot you can share.
+# Deploys the committed static dashboard under dashboard/ to GitHub Pages. Runs
+# automatically after "tools - ccr-dashboard-publish" commits fresh run data to
+# the default branch, and can also be run manually (Actions -> "tools -
+# ccr-dashboard-pages" -> Run workflow) to redeploy the current committed state.
+#
+# NOTE: requires the repo's Pages source to be set to "GitHub Actions", and the
+# workflow_run trigger only fires once this workflow lives on the default branch.
 name: "tools - ccr-dashboard-pages"
 
 on:
   workflow_dispatch: {}
+  # Auto-deploy after the publish workflow commits fresh data.
+  workflow_run:
+    workflows: ["tools - ccr-dashboard-publish"]
+    types: [completed]
 
 permissions:
   contents: read
@@ -21,12 +28,21 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # Manual runs always deploy; auto runs only after a successful publish.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Deploy the freshest committed dashboard: publish pushes new data to
+          # the default branch, and on workflow_run the default checkout SHA can
+          # predate that push — so pin to the default branch tip.
+          ref: ${{ github.event.repository.default_branch }}
 
       - name: Upload dashboard as Pages artifact
         uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1

@@ -186,9 +186,12 @@ post-steps:
       # Settled PR count prep selected (0 if prep never wrote its summary).
       PR_COUNT=$(node -e 'try{process.stdout.write(String(require(process.env.CCR_CACHE+"/prep-summary.json").prCount))}catch{process.stdout.write("0")}')
       MIN_PRS=$(node -e 'process.stdout.write(String(require("./config.json").minPrs))')
-      # Agent explicitly short-circuited with noop → a done "signal-noop".
+      # Agent explicitly short-circuited with a real `noop` entry → a done
+      # "signal-noop". Parse the safe-outputs JSONL by `type` so a "noop"
+      # substring elsewhere (e.g. an issue body or a proposed rule) can never
+      # false-trigger a signal-noop classification.
       NOOP=""
-      if [ -n "${GH_AW_SAFE_OUTPUTS:-}" ] && [ -f "${GH_AW_SAFE_OUTPUTS:-}" ] && grep -q '"noop"' "$GH_AW_SAFE_OUTPUTS"; then
+      if [ -n "${GH_AW_SAFE_OUTPUTS:-}" ] && [ -f "${GH_AW_SAFE_OUTPUTS:-}" ] && node -e 'const fs=require("fs");const hit=fs.readFileSync(process.env.GH_AW_SAFE_OUTPUTS,"utf8").split(String.fromCharCode(10)).filter(Boolean).some(l=>{try{return JSON.parse(l).type==="noop"}catch{return false}});process.exit(hit?0:1)'; then
         NOOP="--agent-noop"
       fi
       # Run-JSON present on disk → the produce evidence (upload is confirmed by

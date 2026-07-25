@@ -551,6 +551,25 @@ function listFromSearch(opts: Options): ListedPr[] {
     log.info(`gh ${args.join(" ")}`);
     const prs = ghJsonSync<ListedPr[]>(args);
     log.info(`${prs.length} PR(s) found`);
+    // Truncation guard. `gh pr list` (and GitHub search under it) is hard-capped
+    // at 1000 results; an uncapped window that returns the full requested limit
+    // was almost certainly truncated to the most-recent N merges, silently
+    // biasing every metric toward end-of-window. Surface it LOUDLY (log.error
+    // always emits and prep-run inherits this stderr) so a truncated "full
+    // cohort" is never mistaken for a complete one — the fix is a finer window.
+    const requestedLimit = Number(opts.minPrs ?? opts.limit);
+    const effectiveCap = Number.isFinite(requestedLimit)
+        ? Math.min(requestedLimit, 1000)
+        : 1000;
+    if (prs.length >= effectiveCap) {
+        log.error(
+            `WARNING: fetch hit the ${String(effectiveCap)}-PR listing cap ` +
+                `(${String(prs.length)} returned) — this window is likely ` +
+                `TRUNCATED to the most-recent merges and its metrics are NOT ` +
+                `a full-cohort measurement. Use a finer window granularity ` +
+                `(e.g. biweekly/weekly) so each window stays under the cap.`,
+        );
+    }
     return prs;
 }
 
