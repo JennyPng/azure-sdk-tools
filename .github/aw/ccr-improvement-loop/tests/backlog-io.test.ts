@@ -93,7 +93,7 @@ describe("ledger/skip IO", () => {
         const skipped = readSkippedFile(join(root, "skipped.json"));
         expect(ledger).toHaveLength(2);
 
-        const d = derivePending(windows, ledger, skipped);
+        const d = derivePending(windows, ledger, skipped, 1);
         expect(d.done.map((w) => w.windowId)).toEqual([windows[0]!.windowId]);
         expect(d.skipped.map((w) => w.windowId)).toEqual([
             windows[2]!.windowId,

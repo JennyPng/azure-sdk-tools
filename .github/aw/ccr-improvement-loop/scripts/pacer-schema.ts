@@ -36,6 +36,24 @@ export const DONE_OUTCOMES: readonly Outcome[] = [
     "signal-noop",
 ];
 
+/**
+ * How a `failed` outcome is classified for retry policy:
+ *
+ *  - `transient` — a retriable infra/budget failure (rate limit, secondary
+ *    limit, 5xx, timeout, a depleted API budget, or a crashed/cancelled leg that
+ *    never emitted an outcome). It does NOT consume a retry attempt and is NEVER
+ *    retired — the window stays pending and is re-dispatched when budget allows.
+ *  - `hard` — a genuine failure (a real error, bad data, an audit trip). It
+ *    consumes a retry attempt; once `attempt` exceeds `retry_cap` the window is
+ *    EXHAUSTED and the pacer fails LOUDLY so a human is notified — it is never
+ *    silently skipped.
+ *
+ * Only meaningful on a `failed` record; omitted for DONE outcomes.
+ */
+export const FAILURE_KINDS = ["transient", "hard"] as const;
+export const FailureKindSchema = z.enum(FAILURE_KINDS);
+export type FailureKind = (typeof FAILURE_KINDS)[number];
+
 /** Backlog expansion granularity. Monthly is the default. */
 export const GRANULARITIES = ["month", "biweekly", "week"] as const;
 export const GranularitySchema = z.enum(GRANULARITIES);
@@ -192,6 +210,12 @@ export const OutcomeArtifactSchema = z
     .object({
         window_id: z.string().min(1),
         outcome: OutcomeSchema,
+        /**
+         * Retry classification, present ONLY on a `failed` outcome. Absent (or
+         * `undefined`) on a DONE outcome; a missing value on a `failed` record is
+         * read conservatively as `hard`.
+         */
+        failure_kind: FailureKindSchema.optional(),
         /** Deterministic run-artifact basename (`run-<window_id>`). */
         artifact_name: z.string().min(1),
         /** GitHub Actions run id (string form). */
@@ -221,6 +245,13 @@ export const LedgerRecordSchema = z
         /** Run-JSON schema version at write time. */
         schema_version: z.string().min(1),
         outcome: OutcomeSchema,
+        /**
+         * Retry classification, present ONLY on a `failed` record (a `transient`
+         * failure stays pending without consuming the retry cap; a `hard` failure
+         * consumes it and, once exhausted, fails the pacer loudly). Absent on DONE
+         * records; a missing value on a `failed` record is read as `hard`.
+         */
+        failure_kind: FailureKindSchema.optional(),
         attempt: z.number().int().positive(),
         run_id: z.string().min(1),
         artifact_name: z.string().min(1),

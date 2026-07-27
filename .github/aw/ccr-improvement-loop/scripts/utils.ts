@@ -304,6 +304,23 @@ export async function ghApiGraphqlAsync<T>(
     );
 }
 
+/**
+ * Signature of a **transient** GitHub failure — one that is expected to clear on
+ * its own (a primary/secondary rate limit, an abuse flag, a 5xx, or a timeout).
+ * Both the in-request retry loop ({@link withGhRetry}) AND the pacer's retry
+ * policy classify off this one regex, so "retriable in the moment" and
+ * "retriable across ticks" can never drift apart. A window that fails with a
+ * transient message is re-dispatched when budget allows rather than counted
+ * toward the retry cap or retired.
+ */
+export const TRANSIENT_FAILURE_RE =
+    /rate limit|secondary rate|abuse|was submitted too quickly|HTTP 5\d\d|timeout/i;
+
+/** True when `message` looks like a transient (retriable) GitHub failure. */
+export function isTransientFailureMessage(message: string): boolean {
+    return TRANSIENT_FAILURE_RE.test(message);
+}
+
 async function withGhRetry<T>(
     maxRetries: number,
     fn: () => Promise<T>,
@@ -315,10 +332,7 @@ async function withGhRetry<T>(
         } catch (err) {
             attempt++;
             const msg = err instanceof Error ? err.message : String(err);
-            const retriable =
-                /rate limit|secondary rate|abuse|was submitted too quickly|HTTP 5\d\d|timeout/i.test(
-                    msg,
-                );
+            const retriable = isTransientFailureMessage(msg);
             if (!retriable || attempt > maxRetries) throw err;
             // Prefer the server-advertised Retry-After; else exponential backoff.
             const backoffMs =

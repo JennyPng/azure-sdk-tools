@@ -31,6 +31,7 @@ import { parseArgs as nodeParseArgs } from "node:util";
 import {
     parseOutcomeArtifact,
     type Cost,
+    type FailureKind,
     type Outcome,
     type OutcomeArtifact,
 } from "./pacer-schema.ts";
@@ -70,6 +71,13 @@ export function classifyOutcome(s: OutcomeSignals): Outcome {
 export interface BuildOutcomeInput {
     windowId: string;
     outcome: Outcome;
+    /**
+     * Retry classification for a `failed` outcome (`transient` stays pending
+     * without consuming the retry cap; `hard` consumes it). Ignored — and omitted
+     * from the artifact — for DONE outcomes. Defaults to `hard` when a run failed
+     * but no transient signal was detected.
+     */
+    failureKind?: FailureKind;
     /** GitHub Actions run id (string form). */
     runId: string;
     /** GitHub Actions run attempt (1-based). */
@@ -82,7 +90,8 @@ export interface BuildOutcomeInput {
 /**
  * Assemble + validate the outcome artifact. `artifact_name` is derived
  * deterministically from `windowId`, so it is stable across attempts and
- * knowable without inspecting the upload.
+ * knowable without inspecting the upload. `failure_kind` is attached ONLY to a
+ * `failed` outcome (defaulting to `hard`), never to a DONE outcome.
  */
 export function buildOutcome(input: BuildOutcomeInput): OutcomeArtifact {
     const artifact: OutcomeArtifact = {
@@ -94,6 +103,9 @@ export function buildOutcome(input: BuildOutcomeInput): OutcomeArtifact {
         ts: input.ts,
         cost: input.cost,
     };
+    if (input.outcome === "failed") {
+        artifact.failure_kind = input.failureKind ?? "hard";
+    }
     // Validate on write — the schema is the pacer's contract.
     return parseOutcomeArtifact(artifact);
 }
@@ -131,6 +143,8 @@ function usage(): string {
         "  --agent-noop           Agent explicitly called noop",
         "  --upload-confirmed     Run-JSON artifact upload confirmed",
         "  --hard-failure         A hard failure occurred (overrides all)",
+        "  --failure-kind <kind>  On failure, `transient` (retry, stay pending) or",
+        "                         `hard` (consume retry cap; default)",
         "  --cost-rest <N>        Observed core REST calls (default 0)",
         "  --cost-graphql <N>     Observed GraphQL points (default 0)",
         "  --out-dir <dir>        Write outcome-<id>.json here (else stdout)",
@@ -151,6 +165,7 @@ function main(): void {
             "agent-noop": { type: "boolean", default: false },
             "upload-confirmed": { type: "boolean", default: false },
             "hard-failure": { type: "boolean", default: false },
+            "failure-kind": { type: "string" },
             "cost-rest": { type: "string" },
             "cost-graphql": { type: "string" },
             "out-dir": { type: "string" },
@@ -178,9 +193,19 @@ function main(): void {
         hardFailure: v["hard-failure"],
     });
 
+    const failureKindArg = v["failure-kind"];
+    if (
+        failureKindArg !== undefined &&
+        failureKindArg !== "transient" &&
+        failureKindArg !== "hard"
+    ) {
+        throw new Error("--failure-kind must be `transient` or `hard`");
+    }
+
     const artifact = buildOutcome({
         windowId,
         outcome,
+        failureKind: failureKindArg,
         runId,
         attempt: intArg(v.attempt, "attempt"),
         ts: v.ts ?? new Date().toISOString(),

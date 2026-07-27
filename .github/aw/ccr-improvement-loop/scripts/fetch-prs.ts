@@ -34,9 +34,15 @@ import type {
     User,
 } from "./types.ts";
 import { RAW_SCHEMA_VERSION } from "./run-schema.ts";
-import { ghJsonSync, makeLogger, runWithConcurrency } from "./utils.ts";
+import {
+    ghJsonSync,
+    isTransientFailureMessage,
+    makeLogger,
+    runWithConcurrency,
+} from "./utils.ts";
 import { defaultGhClient, type GhClient } from "./gh-client.ts";
 import { assembleViaGraphql } from "./pr-graphql.ts";
+import { writePrepFailure } from "./prep-failure.ts";
 
 const log = makeLogger("fetch-prs");
 
@@ -580,30 +586,49 @@ async function main(): Promise<void> {
     opts.repo = repo;
     const cacheDir = resolveCacheDir(repo, opts.cacheDir);
 
-    const numbers =
-        opts.numbers.length > 0
-            ? opts.numbers.map((n) => Number(n))
-            : listFromSearch(opts).map((p) => p.number);
+    try {
+        const numbers =
+            opts.numbers.length > 0
+                ? opts.numbers.map((n) => Number(n))
+                : listFromSearch(opts).map((p) => p.number);
 
-    const fetched = await runWithConcurrency(
-        numbers,
-        Number(opts.concurrency),
-        (n) => fetchPrToCache(repo, cacheDir, opts.refresh, n),
-    );
-
-    const result = {
-        repo,
-        cacheDir,
-        count: fetched.length,
-        cacheHits: fetched.filter((f) => f.cacheHit).length,
-        fetched,
-    };
-    if (opts.json) {
-        process.stdout.write(JSON.stringify(result, null, 2) + "\n");
-    } else {
-        process.stderr.write(
-            `fetched ${result.count} PR(s) (${result.cacheHits} cache hits) → ${cacheDir}\n`,
+        const fetched = await runWithConcurrency(
+            numbers,
+            Number(opts.concurrency),
+            (n) => fetchPrToCache(repo, cacheDir, opts.refresh, n),
         );
+
+        const result = {
+            repo,
+            cacheDir,
+            count: fetched.length,
+            cacheHits: fetched.filter((f) => f.cacheHit).length,
+            fetched,
+        };
+        if (opts.json) {
+            process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+        } else {
+            process.stderr.write(
+                `fetched ${result.count} PR(s) (${result.cacheHits} cache hits) → ${cacheDir}\n`,
+            );
+        }
+    } catch (err: unknown) {
+        // A rate-limit / 5xx / timeout mid-fetch is transient: mark it so the
+        // pacer keeps the window pending and re-dispatches it when budget
+        // recovers, instead of counting it toward the retry cap.
+        const msg = err instanceof Error ? err.message : String(err);
+        if (isTransientFailureMessage(msg)) {
+            try {
+                writePrepFailure(cacheDir, {
+                    kind: "transient",
+                    stage: "fetch-prs",
+                    message: msg,
+                });
+            } catch {
+                // Best-effort: never let a marker-write failure mask the error.
+            }
+        }
+        throw err;
     }
 }
 

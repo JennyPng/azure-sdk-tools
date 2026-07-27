@@ -3,16 +3,21 @@
  * backlog.ts — derive the PENDING backlog from desired windows + the durable
  * completion ledger (Track B, Phase 3).
  *
- *   pending = desired − done − skipped
+ *   pending = desired − done − skipped − hardFailed
  *
  * where the joins are by canonical `window_id`, NEVER by filename or by
  * repo/date/cohort fields:
  *
  *  - **done**    = a `ledger/<window_id>.json` exists whose `outcome` is one of
  *    {@link DONE_OUTCOMES} (`produced | thin-noop | signal-noop`). A `failed`
- *    record is NOT done — it stays pending so the pacer can retry it (up to the
- *    Phase 4 cap, after which it is retired into `skipped.json`).
- *  - **skipped** = the `window_id` is listed in `skipped.json`.
+ *    record is NOT done — a `transient` failure stays pending so the pacer
+ *    re-dispatches it when budget allows, and a `hard` failure stays pending
+ *    until it exhausts the retry cap.
+ *  - **skipped** = the `window_id` is listed in `skipped.json` (a manual escape
+ *    hatch; the pacer no longer writes it automatically).
+ *  - **hardFailed** = a `failed` record classified `hard` whose `attempt` has
+ *    passed the retry cap. Not re-dispatched, but surfaced loudly by the pacer so
+ *    a human is notified — never silently dropped.
  *
  * Matching by identity (not filename) is what makes the ledger tamper-evident:
  * a record whose stored repo/start/cohort/schema disagrees with its own
@@ -40,37 +45,72 @@ import {
 
 /** The derived split of a desired backlog against the ledger. */
 export interface BacklogDerivation {
-    /** Windows still needing a run (not done, not skipped). */
+    /** Windows still needing a run (not done, not skipped, not hard-exhausted). */
     pending: BacklogWindow[];
     /** Windows with a terminal DONE ledger record. */
     done: BacklogWindow[];
-    /** Windows retired into skipped.json. */
+    /** Windows manually retired into skipped.json. */
     skipped: BacklogWindow[];
+    /**
+     * Windows whose ledger record is a `hard` failure that has exhausted the
+     * retry cap. They are NOT re-dispatched (retrying a genuine failure just
+     * burns budget), but the pacer surfaces them LOUDLY every tick so a human is
+     * notified — they are never silently dropped like a `skipped` window.
+     */
+    hardFailed: BacklogWindow[];
 }
 
 /**
- * Pure derive: split `desired` into pending/done/skipped by `window_id`.
+ * A `failed` ledger record is a hard exhaustion when it is explicitly classified
+ * `hard` AND its durable attempt count has passed the retry cap. A `transient`
+ * failure (or a legacy record with no `failure_kind`) is NEVER an exhaustion — it
+ * stays pending and is retried when budget allows.
+ */
+function isHardExhausted(r: LedgerRecord, retryCap: number): boolean {
+    return (
+        r.outcome === "failed" &&
+        r.failure_kind === "hard" &&
+        r.attempt > retryCap
+    );
+}
+
+/**
+ * Pure derive: split `desired` into pending/done/skipped/hardFailed by
+ * `window_id`.
  *
  * `done` is the set of window ids with a DONE-outcome ledger record; `skipped`
- * is the set listed in `skipped.json`. Skipped takes precedence over done only
- * incidentally — a window is at most one of the three, evaluated skipped → done →
- * pending, but a well-formed state never has a window both skipped and done.
+ * is the set listed in `skipped.json`; `hardFailed` is the set with a `hard`
+ * failure past the retry cap. A window is evaluated skipped → hardFailed → done →
+ * pending, so any failed window that is transient (or still within the cap) falls
+ * through to `pending` and is retried.
  */
 export function derivePending(
     desired: BacklogWindow[],
     ledger: LedgerRecord[],
     skipped: Skipped,
+    retryCap: number,
 ): BacklogDerivation {
     const doneIds = new Set(
         ledger
             .filter((r) => DONE_OUTCOMES.includes(r.outcome))
             .map((r) => r.window_id),
     );
+    const hardFailedIds = new Set(
+        ledger
+            .filter((r) => isHardExhausted(r, retryCap))
+            .map((r) => r.window_id),
+    );
     const skippedIds = new Set(skipped.windows.map((w) => w.window_id));
 
-    const out: BacklogDerivation = { pending: [], done: [], skipped: [] };
+    const out: BacklogDerivation = {
+        pending: [],
+        done: [],
+        skipped: [],
+        hardFailed: [],
+    };
     for (const w of desired) {
         if (skippedIds.has(w.windowId)) out.skipped.push(w);
+        else if (hardFailedIds.has(w.windowId)) out.hardFailed.push(w);
         else if (doneIds.has(w.windowId)) out.done.push(w);
         else out.pending.push(w);
     }
@@ -156,13 +196,14 @@ function main(): void {
         ? readSkippedFile(path.join(stateDir, "skipped.json"))
         : { windows: [] };
 
-    const derived = derivePending(desired, ledger, skipped);
+    const derived = derivePending(desired, ledger, skipped, config.retry_cap);
     process.stdout.write(
         `${JSON.stringify(
             {
                 pending: derived.pending.map((w) => w.windowId),
                 done: derived.done.map((w) => w.windowId),
                 skipped: derived.skipped.map((w) => w.windowId),
+                hardFailed: derived.hardFailed.map((w) => w.windowId),
             },
             null,
             2,

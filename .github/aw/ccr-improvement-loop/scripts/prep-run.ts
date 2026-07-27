@@ -27,13 +27,18 @@ import {
 } from "./pacer-schema.ts";
 import { buildPrepSummary } from "./prep-summary.ts";
 import type { PrepSummary } from "./prep-summary.ts";
+import {
+    clearPrepFailure,
+    readPrepFailure,
+    writePrepFailure,
+} from "./prep-failure.ts";
 import { resolveWindow } from "./resolve-window.ts";
 import type {
     AttributedComment,
     JudgeInputItem,
     PullRequestData,
 } from "./types.ts";
-import { makeLogger, sha256 } from "./utils.ts";
+import { makeLogger, isTransientFailureMessage, sha256 } from "./utils.ts";
 import { type Cohort } from "./window-id.ts";
 
 const log = makeLogger("prep-run");
@@ -276,6 +281,9 @@ function main(): void {
     const cacheDir = v["cache-dir"];
     const cfg = loadConfig(v.config);
     fs.mkdirSync(cacheDir, { recursive: true });
+    // Drop any stale transient marker from an earlier attempt so it can never
+    // mislabel a later hard failure (a fresh runner has none, but be defensive).
+    clearPrepFailure(cacheDir);
     const glob = path.join(cacheDir, "pr-*.json");
 
     const settleDays = Number.parseInt(v["settle-days"], 10);
@@ -380,11 +388,41 @@ function main(): void {
     }
 }
 
+/**
+ * Read `--cache-dir` straight from argv for the top-level failure handler, which
+ * needs it to drop a transient marker without re-running the full arg parse.
+ */
+function cacheDirFromArgv(argv: string[]): string | undefined {
+    const i = argv.indexOf("--cache-dir");
+    return i >= 0 ? argv[i + 1] : undefined;
+}
+
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
     try {
         main();
     } catch (err: unknown) {
-        log.error(err instanceof Error ? err.message : String(err));
+        const msg = err instanceof Error ? err.message : String(err);
+        log.error(msg);
+        // A budget-preflight shortfall or a transient gh failure that surfaced
+        // outside fetch-prs (which writes its own marker) is retriable: mark it
+        // so the pacer keeps the window pending instead of consuming a retry.
+        // Absence of a marker ⇒ a hard failure the pacer must surface loudly.
+        const cacheDir = cacheDirFromArgv(process.argv.slice(2));
+        if (
+            cacheDir !== undefined &&
+            (isTransientFailureMessage(msg) || /budget preflight/i.test(msg)) &&
+            readPrepFailure(cacheDir) === null
+        ) {
+            try {
+                writePrepFailure(cacheDir, {
+                    kind: "transient",
+                    stage: "prep-run",
+                    message: msg,
+                });
+            } catch {
+                // Best-effort: never mask the original failure.
+            }
+        }
         process.exit(1);
     }
 }

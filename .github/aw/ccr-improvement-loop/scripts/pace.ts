@@ -7,8 +7,10 @@
  * predictive estimator (see deferred-and-scope.md, D15). Each tick:
  *
  *   plan   = reconcile(previous tick) → derivePending(gen-backlog − ledger −
- *            skipped) → assertFittable (starvation guard) → admit (fits every
- *            metered pool minus margin, ≤ 1 window/repo, ≤ max_windows_per_tick).
+ *            skipped − hardFailed) → assertFittable (starvation guard) → admit
+ *            (fits every metered pool minus margin, ≤ 1 window/repo,
+ *            ≤ max_windows_per_tick). Fails loudly if any window is a hard
+ *            failure past the retry cap.
  *
  * Every function here is pure and unit-tested; the CLI at the bottom is the only
  * IO (reads `gh api rate_limit`, the state-branch `ledger/`+`skipped.json`, and
@@ -23,9 +25,13 @@
  *     `failed`, never hits the retry cap). Because the estimate is a constant,
  *     that's a whole-config error, so we fail the plan LOUDLY at admission time
  *     instead of letting it hide as a perpetually-pending window.
- *  2. **retry cap** — a `failed` (or missing-outcome) window is retried a bounded
- *     number of times (durable `attempt` in the ledger) then retired to
- *     `skipped.json`, so a poison window can't wedge the backlog.
+ *  2. **retry policy** — a `failed` window is classified `transient` or `hard`.
+ *     A `transient` failure (rate limit, 5xx, timeout, depleted budget, or a
+ *     crashed/cancelled leg) stays pending and is re-dispatched when budget
+ *     allows — it never consumes a retry. A `hard` failure consumes a bounded
+ *     number of retries (durable `attempt` in the ledger); once past the cap the
+ *     window is EXHAUSTED and the pacer fails LOUDLY so a human is notified,
+ *     rather than silently retiring it.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -301,8 +307,13 @@ export function admit(
 export interface ReconcileResult {
     /** New/updated ledger records (one per admitted window), keyed by window_id. */
     records: LedgerRecord[];
-    /** Windows newly retired to skipped.json (retry cap exceeded). */
-    newlySkipped: SkippedWindow[];
+    /**
+     * Windows that just failed HARD past the retry cap. The pacer surfaces these
+     * loudly (the reconcile CLI logs them; the next plan tick fails on them) so a
+     * genuine failure is never silently dropped. They are NOT written to
+     * `skipped.json` — retry cap exhaustion no longer auto-skips.
+     */
+    hardFailures: SkippedWindow[];
 }
 
 export interface ReconcileOptions {
@@ -313,19 +324,25 @@ export interface ReconcileOptions {
 }
 
 /**
- * Reconcile a completed tick: every admitted window MUST have an outcome artifact;
- * a missing one means the backfill leg never emitted (crash/cancel) and is treated
- * as `failed`. For each admitted window:
+ * Reconcile a completed tick: every admitted window MUST have an outcome
+ * artifact. For each admitted window:
  *
  *  - **DONE outcome** (`produced|thin-noop|signal-noop`) → a terminal ledger
  *    record; never retried.
- *  - **`failed` / missing** → a `failed` ledger record with `attempt` incremented
- *    from any prior record. Once `attempt` exceeds `retry_cap` (default 1 ⇒ the
- *    second failure), the window is ALSO retired to `skipped.json` so it can't
- *    poison-loop; derivePending drops skipped windows regardless of the record.
+ *  - **`transient` failure** (an explicit `transient` outcome, OR a MISSING
+ *    artifact — a crashed/cancelled leg is infra, not a code bug) → a `failed`
+ *    record tagged `transient` whose `attempt` is NOT incremented. It stays
+ *    pending and is re-dispatched when budget allows; it is NEVER retired.
+ *  - **`hard` failure** → a `failed` record tagged `hard` with `attempt`
+ *    incremented from any prior record. Once `attempt` exceeds `retry_cap`
+ *    (default 1 ⇒ the second hard failure) the window is EXHAUSTED: it is
+ *    reported in {@link ReconcileResult.hardFailures} so the pacer fails loudly,
+ *    but it is left in the ledger (not skipped) so a human can see and clear it.
  *
- * `attempt` is the DURABLE per-window attempt counter carried in the ledger, not
- * the GitHub run attempt — so the retry cap survives across ticks and re-dispatch.
+ * `attempt` is the DURABLE per-window HARD-attempt counter carried in the ledger,
+ * not the GitHub run attempt — so the retry cap survives across ticks and
+ * re-dispatch. Transient failures never advance it, so a long rate-limited spell
+ * can't exhaust a window.
  */
 export function reconcile(
     admitted: BacklogWindow[],
@@ -337,7 +354,7 @@ export function reconcile(
     const outcomeById = new Map(outcomes.map((o) => [o.window_id, o]));
     const priorById = new Map(priorLedger.map((r) => [r.window_id, r]));
     const records: LedgerRecord[] = [];
-    const newlySkipped: SkippedWindow[] = [];
+    const hardFailures: SkippedWindow[] = [];
 
     for (const window of admitted) {
         const prior = priorById.get(window.windowId);
@@ -362,8 +379,18 @@ export function reconcile(
             continue;
         }
 
-        // Failure path: explicit `failed` outcome OR no artifact at all.
-        const attempt = priorAttempt + 1;
+        // Failure path: explicit `failed` outcome OR no artifact at all. A
+        // missing artifact means the leg crashed/cancelled before emitting — infra,
+        // so transient. An explicit `failed` outcome carries its own kind
+        // (defaulting to `hard` when unclassified).
+        const failureKind: "transient" | "hard" = !outcome
+            ? "transient"
+            : (outcome.failure_kind ?? "hard");
+        // Only a HARD failure consumes the retry budget; a transient one holds.
+        const attempt =
+            failureKind === "hard"
+                ? priorAttempt + 1
+                : Math.max(priorAttempt, 1);
         records.push({
             window_id: window.windowId,
             repo: window.repo,
@@ -372,24 +399,25 @@ export function reconcile(
             cohort: window.cohort,
             schema_version: RAW_SCHEMA_VERSION,
             outcome: "failed",
+            failure_kind: failureKind,
             attempt,
             run_id: outcome?.run_id ?? opts.pacerRunId,
             artifact_name:
                 outcome?.artifact_name ?? runArtifactBase(window.windowId),
             ts: outcome?.ts ?? opts.now,
         });
-        if (attempt > config.retry_cap) {
-            newlySkipped.push({
+        if (failureKind === "hard" && attempt > config.retry_cap) {
+            hardFailures.push({
                 window_id: window.windowId,
-                reason: `exceeded retry cap (${String(config.retry_cap)}) after ${String(
-                    attempt,
-                )} failed attempts`,
+                reason: `hard failure past retry cap (${String(
+                    config.retry_cap,
+                )}) after ${String(attempt)} attempts`,
                 ts: opts.now,
             });
         }
     }
 
-    return { records, newlySkipped };
+    return { records, hardFailures };
 }
 
 // ---------------------------------------------------------------------------
@@ -412,6 +440,7 @@ function loadPending(
     settleDays: number | undefined,
 ): {
     pending: BacklogWindow[];
+    hardFailed: BacklogWindow[];
     ledger: LedgerRecord[];
     skipped: Skipped;
 } {
@@ -420,8 +449,13 @@ function loadPending(
     const skipped = stateDir
         ? readSkippedFile(path.join(stateDir, "skipped.json"))
         : { windows: [] };
-    const { pending } = derivePending(desired, ledger, skipped);
-    return { pending, ledger, skipped };
+    const { pending, hardFailed } = derivePending(
+        desired,
+        ledger,
+        skipped,
+        config.retry_cap,
+    );
+    return { pending, hardFailed, ledger, skipped };
 }
 
 /** Shape emitted for the backfill matrix (one entry per admitted window). */
@@ -495,7 +529,27 @@ async function runPlan(v: CliValues): Promise<void> {
     const now = v["now-ms"] === undefined ? Date.now() : Number(v["now-ms"]);
     const stateDir = v.state ?? "";
 
-    const { pending } = loadPending(config, stateDir, now, settleDays);
+    const { pending, hardFailed } = loadPending(
+        config,
+        stateDir,
+        now,
+        settleDays,
+    );
+
+    // A `hard` failure that has exhausted the retry cap is NOT retried (that
+    // would just burn budget on a genuine failure) — but it must never vanish
+    // silently. Fail the tick LOUDLY, every tick, until a human addresses it and
+    // clears the ledger record. `--dry-run` reports instead of throwing so an
+    // operator can still inspect the plan.
+    if (hardFailed.length > 0 && !v["dry-run"]) {
+        const ids = hardFailed.map((w) => w.windowId).join(", ");
+        throw new Error(
+            `${String(hardFailed.length)} window(s) failed hard past the retry ` +
+                `cap and need attention: ${ids}. The pacer will keep failing ` +
+                `until each is fixed and its ledger/<window_id>.json record is ` +
+                `deleted (which re-plans it fresh at attempt 1).`,
+        );
+    }
 
     const budget = v["budget-file"]
         ? readBudget(JSON.parse(fs.readFileSync(v["budget-file"], "utf8")))
@@ -513,6 +567,7 @@ async function runPlan(v: CliValues): Promise<void> {
                 {
                     pending: pending.length,
                     admitted: matrix,
+                    hardFailed: hardFailed.map((w) => w.windowId),
                     deferred: deferred.map((d) => ({
                         window_id: d.window.windowId,
                         reason: d.reason,
@@ -562,11 +617,8 @@ function runReconcile(v: CliValues): void {
     const priorLedger = stateDir
         ? readLedgerDir(path.join(stateDir, "ledger"))
         : [];
-    const priorSkipped = stateDir
-        ? readSkippedFile(path.join(stateDir, "skipped.json"))
-        : { windows: [] };
 
-    const { records, newlySkipped } = reconcile(
+    const { records, hardFailures } = reconcile(
         admitted,
         outcomes,
         priorLedger,
@@ -578,18 +630,14 @@ function runReconcile(v: CliValues): void {
     );
 
     writeLedger(outStateDir, records);
-    if (newlySkipped.length > 0) {
-        writeSkipped(
-            path.join(outStateDir, "skipped.json"),
-            priorSkipped,
-            newlySkipped,
-        );
-    }
     process.stderr.write(
         `reconciled ${String(records.length)} record(s); ${String(
-            newlySkipped.length,
-        )} newly skipped\n`,
+            hardFailures.length,
+        )} hard failure(s) past the retry cap\n`,
     );
+    for (const h of hardFailures) {
+        process.stderr.write(`::error::${h.window_id}: ${h.reason}\n`);
+    }
 }
 
 /** Cohort token from a matrix `max_prs` string (empty ⇒ uncapped). */
@@ -630,19 +678,6 @@ function writeLedger(stateDir: string, records: LedgerRecord[]): void {
             `${JSON.stringify(r, null, 2)}\n`,
         );
     }
-}
-
-/** Merge new skipped windows into skipped.json (dedup by window_id). */
-function writeSkipped(
-    file: string,
-    prior: Skipped,
-    additions: SkippedWindow[],
-): void {
-    const byId = new Map(prior.windows.map((w) => [w.window_id, w]));
-    for (const w of additions) byId.set(w.window_id, w);
-    const merged: Skipped = { windows: [...byId.values()] };
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, `${JSON.stringify(merged, null, 2)}\n`);
 }
 
 async function main(): Promise<void> {

@@ -50,11 +50,12 @@ function ledgerFor(w: BacklogWindow, outcome: Outcome): LedgerRecord {
 }
 
 const noSkips: Skipped = { windows: [] };
+const RETRY_CAP = 1;
 
 describe("derivePending — done/pending/skipped by identity", () => {
     it("empty ledger ⇒ everything pending", () => {
         const desired = desiredWindows();
-        const d = derivePending(desired, [], noSkips);
+        const d = derivePending(desired, [], noSkips, RETRY_CAP);
         expect(d.pending).toHaveLength(desired.length);
         expect(d.done).toHaveLength(0);
         expect(d.skipped).toHaveLength(0);
@@ -63,7 +64,7 @@ describe("derivePending — done/pending/skipped by identity", () => {
     it("a fully-ledgered range terminates (pending empty)", () => {
         const desired = desiredWindows();
         const ledger = desired.map((w) => ledgerFor(w, "produced"));
-        const d = derivePending(desired, ledger, noSkips);
+        const d = derivePending(desired, ledger, noSkips, RETRY_CAP);
         expect(d.pending).toHaveLength(0);
         expect(d.done).toHaveLength(desired.length);
     });
@@ -77,7 +78,7 @@ describe("derivePending — done/pending/skipped by identity", () => {
             ledgerFor(desired[2]!, "signal-noop"),
             ledgerFor(desired[3]!, "failed"),
         ];
-        const d = derivePending(desired, ledger, noSkips);
+        const d = derivePending(desired, ledger, noSkips, RETRY_CAP);
         const doneIds = new Set(d.done.map((w) => w.windowId));
         expect(doneIds.has(desired[0]!.windowId)).toBe(true);
         expect(doneIds.has(desired[1]!.windowId)).toBe(true);
@@ -97,7 +98,7 @@ describe("derivePending — done/pending/skipped by identity", () => {
             "azure-sdk-for-go",
             "azure-sdk-for-net",
         );
-        const d = derivePending(desired, [foreign], noSkips);
+        const d = derivePending(desired, [foreign], noSkips, RETRY_CAP);
         expect(d.done).toHaveLength(0);
         expect(d.pending).toHaveLength(desired.length);
     });
@@ -113,12 +114,80 @@ describe("derivePending — done/pending/skipped by identity", () => {
                 },
             ],
         };
-        const d = derivePending(desired, [], skipped);
+        const d = derivePending(desired, [], skipped, RETRY_CAP);
         expect(d.skipped.map((w) => w.windowId)).toEqual([
             desired[1]!.windowId,
         ]);
         expect(d.pending.map((w) => w.windowId)).not.toContain(
             desired[1]!.windowId,
+        );
+    });
+});
+
+/** A schema-valid `failed` record with an explicit kind + attempt. */
+function failedLedger(
+    w: BacklogWindow,
+    kind: "transient" | "hard" | undefined,
+    attempt: number,
+): LedgerRecord {
+    return LedgerRecordSchema.parse({
+        window_id: w.windowId,
+        repo: w.repo,
+        window_start: w.windowStart,
+        window_end: w.windowEnd,
+        cohort: w.cohort,
+        schema_version: "1.1",
+        outcome: "failed",
+        ...(kind ? { failure_kind: kind } : {}),
+        attempt,
+        run_id: "1001",
+        artifact_name: `run-${w.windowId}`,
+        ts: "2026-05-20T00:00:00Z",
+    });
+}
+
+describe("derivePending — transient vs hard retry policy", () => {
+    it("a transient failure stays pending regardless of attempt count", () => {
+        const desired = desiredWindows();
+        const ledger = [failedLedger(desired[0]!, "transient", 9)];
+        const d = derivePending(desired, ledger, noSkips, RETRY_CAP);
+        expect(d.hardFailed).toHaveLength(0);
+        expect(d.pending.map((w) => w.windowId)).toContain(
+            desired[0]!.windowId,
+        );
+    });
+
+    it("a hard failure within the cap stays pending (still retriable)", () => {
+        const desired = desiredWindows();
+        // attempt == cap is NOT past the cap → pending.
+        const ledger = [failedLedger(desired[0]!, "hard", RETRY_CAP)];
+        const d = derivePending(desired, ledger, noSkips, RETRY_CAP);
+        expect(d.hardFailed).toHaveLength(0);
+        expect(d.pending.map((w) => w.windowId)).toContain(
+            desired[0]!.windowId,
+        );
+    });
+
+    it("a hard failure past the cap is hardFailed, not pending, not skipped", () => {
+        const desired = desiredWindows();
+        const ledger = [failedLedger(desired[0]!, "hard", RETRY_CAP + 1)];
+        const d = derivePending(desired, ledger, noSkips, RETRY_CAP);
+        expect(d.hardFailed.map((w) => w.windowId)).toEqual([
+            desired[0]!.windowId,
+        ]);
+        expect(d.pending.map((w) => w.windowId)).not.toContain(
+            desired[0]!.windowId,
+        );
+        expect(d.skipped).toHaveLength(0);
+    });
+
+    it("a legacy failed record with no failure_kind stays pending (never hard-exhausted)", () => {
+        const desired = desiredWindows();
+        const ledger = [failedLedger(desired[0]!, undefined, 99)];
+        const d = derivePending(desired, ledger, noSkips, RETRY_CAP);
+        expect(d.hardFailed).toHaveLength(0);
+        expect(d.pending.map((w) => w.windowId)).toContain(
+            desired[0]!.windowId,
         );
     });
 });

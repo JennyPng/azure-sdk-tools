@@ -308,7 +308,10 @@ function main(): void {
     const cfg = loadConfig(v.config);
     const meta = readJson<RunMetaInput>(v.meta);
     const classifiedPrs = readArrayShaped<ClassifiedPr>(v.classified, "prs");
-    const comments = readArrayShaped<AttributedComment>(v.attributed, "comments");
+    const comments = readArrayShaped<AttributedComment>(
+        v.attributed,
+        "comments",
+    );
 
     const classByNumber = new Map(classifiedPrs.map((p) => [p.number, p]));
     const rawFiles = [...parsed.positionals];

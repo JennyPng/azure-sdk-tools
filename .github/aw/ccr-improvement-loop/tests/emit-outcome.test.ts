@@ -110,4 +110,40 @@ describe("buildOutcome — deterministic artifact", () => {
     it("names the outcome file deterministically from the window id", () => {
         expect(outcomeFileName(WINDOW_ID)).toBe(`outcome-${WINDOW_ID}.json`);
     });
+
+    it("attaches failure_kind only for a failed outcome (defaulting to hard)", () => {
+        const failed = buildOutcome({
+            windowId: WINDOW_ID,
+            outcome: "failed",
+            runId: "1",
+            attempt: 1,
+            ts: "2026-05-20T12:00:00Z",
+            cost: { rest: 0, graphql: 0 },
+        });
+        expect(failed.failure_kind).toBe("hard");
+
+        const transient = buildOutcome({
+            windowId: WINDOW_ID,
+            outcome: "failed",
+            failureKind: "transient",
+            runId: "1",
+            attempt: 1,
+            ts: "2026-05-20T12:00:00Z",
+            cost: { rest: 0, graphql: 0 },
+        });
+        expect(transient.failure_kind).toBe("transient");
+    });
+
+    it("never attaches failure_kind to a successful outcome", () => {
+        const produced = buildOutcome({
+            windowId: WINDOW_ID,
+            outcome: "produced",
+            failureKind: "hard", // ignored for a non-failed outcome
+            runId: "1",
+            attempt: 1,
+            ts: "2026-05-20T12:00:00Z",
+            cost: { rest: 0, graphql: 0 },
+        });
+        expect(produced.failure_kind).toBeUndefined();
+    });
 });

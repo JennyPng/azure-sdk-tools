@@ -40,7 +40,6 @@ import {
     type LedgerRecord,
     type OutcomeArtifact,
     type PacerConfig,
-    type Skipped,
 } from "../scripts/pacer-schema.ts";
 
 // --- helpers ---------------------------------------------------------------
@@ -92,6 +91,20 @@ function doneOutcome(
     return {
         window_id: w.windowId,
         outcome,
+        artifact_name: `run-${w.windowId}`,
+        run_id: "100",
+        attempt: 1,
+        ts: "2026-04-01T00:00:00Z",
+        cost: { rest: 40, graphql: 20 },
+    };
+}
+
+/** An explicit `failed` outcome classified `hard` (a genuine, non-retriable failure). */
+function hardOutcome(w: BacklogWindow): OutcomeArtifact {
+    return {
+        window_id: w.windowId,
+        outcome: "failed",
+        failure_kind: "hard",
         artifact_name: `run-${w.windowId}`,
         run_id: "100",
         attempt: 1,
@@ -367,7 +380,7 @@ const RECON_OPTS = { now: "2026-04-01T12:00:00Z", pacerRunId: "run-1" };
 describe("reconcile", () => {
     it("writes a terminal record for a DONE outcome and never retries it", () => {
         const w = win(GO, "2026-01-01", "2026-01-31");
-        const { records, newlySkipped } = reconcile(
+        const { records, hardFailures } = reconcile(
             [w],
             [doneOutcome(w, "produced")],
             [],
@@ -377,13 +390,13 @@ describe("reconcile", () => {
         expect(records).toHaveLength(1);
         expect(records[0]?.outcome).toBe("produced");
         expect(records[0]?.schema_version).toBe(RAW_SCHEMA_VERSION);
-        expect(newlySkipped).toHaveLength(0);
+        expect(hardFailures).toHaveLength(0);
     });
 
     it("treats thin-noop and signal-noop as done (not retried)", () => {
         const a = win(GO, "2026-01-01", "2026-01-31");
         const b = win(GO, "2026-02-01", "2026-02-28");
-        const { records, newlySkipped } = reconcile(
+        const { records, hardFailures } = reconcile(
             [a, b],
             [doneOutcome(a, "thin-noop"), doneOutcome(b, "signal-noop")],
             [],
@@ -394,25 +407,42 @@ describe("reconcile", () => {
             "thin-noop",
             "signal-noop",
         ]);
-        expect(newlySkipped).toHaveLength(0);
+        expect(hardFailures).toHaveLength(0);
     });
 
-    it("records a missing outcome artifact as failed (attempt 1)", () => {
+    it("records a missing outcome artifact as a TRANSIENT failure that never exhausts", () => {
         const w = win(GO, "2026-01-01", "2026-01-31");
-        const { records, newlySkipped } = reconcile(
+        // A crashed/cancelled leg (no artifact) is infra, not a bad window: even
+        // with a prior attempt already past the cap it must NOT hard-exhaust.
+        const prior: LedgerRecord = {
+            window_id: w.windowId,
+            repo: GO,
+            window_start: w.windowStart,
+            window_end: w.windowEnd,
+            cohort: "uncapped",
+            schema_version: RAW_SCHEMA_VERSION,
+            outcome: "failed",
+            failure_kind: "transient",
+            attempt: 5,
+            run_id: "run-0",
+            artifact_name: `run-${w.windowId}`,
+            ts: "2026-03-01T00:00:00Z",
+        };
+        const { records, hardFailures } = reconcile(
             [w],
             [], // leg crashed before emitting
-            [],
+            [prior],
             cfg(),
             RECON_OPTS,
         );
         expect(records[0]?.outcome).toBe("failed");
-        expect(records[0]?.attempt).toBe(1);
+        expect(records[0]?.failure_kind).toBe("transient");
+        expect(records[0]?.attempt).toBe(5); // transient does NOT consume the budget
         expect(records[0]?.run_id).toBe("run-1"); // synthesized from pacer run
-        expect(newlySkipped).toHaveLength(0); // retry cap 1 ⇒ first failure retries
+        expect(hardFailures).toHaveLength(0); // transient never hard-fails
     });
 
-    it("increments attempt from the prior ledger record on a repeat failure", () => {
+    it("increments attempt on a repeat HARD failure and reports it past the cap", () => {
         const w = win(GO, "2026-01-01", "2026-01-31");
         const prior: LedgerRecord = {
             window_id: w.windowId,
@@ -422,35 +452,37 @@ describe("reconcile", () => {
             cohort: "uncapped",
             schema_version: RAW_SCHEMA_VERSION,
             outcome: "failed",
+            failure_kind: "hard",
             attempt: 1,
             run_id: "run-0",
             artifact_name: `run-${w.windowId}`,
             ts: "2026-03-01T00:00:00Z",
         };
-        const { records, newlySkipped } = reconcile(
+        const { records, hardFailures } = reconcile(
             [w],
-            [doneOutcome(w, "failed")],
+            [hardOutcome(w)],
             [prior],
             cfg({ retry_cap: 1 }),
             RECON_OPTS,
         );
         expect(records[0]?.attempt).toBe(2);
-        // second failure exceeds retry_cap 1 ⇒ retired to skipped.json.
-        expect(newlySkipped).toHaveLength(1);
-        expect(newlySkipped[0]?.window_id).toBe(w.windowId);
-        expect(newlySkipped[0]?.reason).toMatch(/retry cap/);
+        expect(records[0]?.failure_kind).toBe("hard");
+        // second hard failure exceeds retry_cap 1 ⇒ reported so the pacer halts loudly.
+        expect(hardFailures).toHaveLength(1);
+        expect(hardFailures[0]?.window_id).toBe(w.windowId);
+        expect(hardFailures[0]?.reason).toMatch(/retry cap/);
     });
 
-    it("does not skip on the first failure with the default retry cap", () => {
+    it("does not report on the first hard failure with the default retry cap", () => {
         const w = win(GO, "2026-01-01", "2026-01-31");
-        const { newlySkipped } = reconcile(
+        const { hardFailures } = reconcile(
             [w],
-            [doneOutcome(w, "failed")],
+            [hardOutcome(w)],
             [],
             cfg(),
             RECON_OPTS,
         );
-        expect(newlySkipped).toHaveLength(0);
+        expect(hardFailures).toHaveLength(0);
     });
 });
 
@@ -462,7 +494,7 @@ describe("workflow-boundary reconcile", () => {
         const b = win(PY, "2026-01-01", "2026-01-31");
         const cfail = win("Azure/azure-sdk-for-js", "2026-01-01", "2026-01-31");
         // The failed leg uploaded no outcome artifact (if: always ledger still runs).
-        const { records, newlySkipped } = reconcile(
+        const { records, hardFailures } = reconcile(
             [a, b, cfail],
             [doneOutcome(a, "produced"), doneOutcome(b, "thin-noop")],
             [],
@@ -474,14 +506,14 @@ describe("workflow-boundary reconcile", () => {
         expect(byId.get(b.windowId)?.outcome).toBe("thin-noop");
         expect(byId.get(cfail.windowId)?.outcome).toBe("failed");
         expect(records).toHaveLength(3);
-        expect(newlySkipped).toHaveLength(0); // first failure retries, not skipped
+        expect(hardFailures).toHaveLength(0); // first failure retries, not skipped
     });
 });
 
 // --- two-tick offline drain ------------------------------------------------
 
 describe("two-tick offline drain", () => {
-    it("derives the correct remainder on tick 2 (done not re-admitted, failed retried, deferred now admitted)", () => {
+    it("derives the correct remainder across ticks (done not re-admitted, hard-failed retried then hard-exhausted)", () => {
         const config = cfg({
             repos: [GO, PY],
             est_rest_calls_per_window: 1000,
@@ -493,9 +525,15 @@ describe("two-tick offline drain", () => {
         const now = Date.parse("2026-04-01T00:00:00Z");
         const desired = genBacklog(config, { now });
         expect(desired).toHaveLength(4);
+        const cap = config.retry_cap;
 
         // --- tick 1: nothing done yet ---
-        const t1Pending = derivePending(desired, [], { windows: [] }).pending;
+        const t1Pending = derivePending(
+            desired,
+            [],
+            { windows: [] },
+            cap,
+        ).pending;
         const t1 = admit(
             t1Pending,
             budget({ limit: 15000, remaining: 15000 }),
@@ -505,60 +543,63 @@ describe("two-tick offline drain", () => {
         expect(t1.admitted).toHaveLength(2);
         expect(t1.admitted.map((w) => w.repo).sort()).toEqual([GO, PY]);
 
-        // GO Jan produced; PY Jan failed (missing outcome).
+        // GO Jan produced; PY Jan hard-fails (a genuine, classified failure).
         const goJan = t1.admitted.find((w) => w.repo === GO)!;
         const pyJan = t1.admitted.find((w) => w.repo === PY)!;
         const r1 = reconcile(
             t1.admitted,
-            [doneOutcome(goJan, "produced")],
+            [doneOutcome(goJan, "produced"), hardOutcome(pyJan)],
             [],
             config,
             RECON_OPTS,
         );
         const ledger = r1.records;
-        const skipped: Skipped = { windows: r1.newlySkipped };
+        // First hard failure is within the cap ⇒ nothing reported, nothing skipped.
+        expect(r1.hardFailures).toHaveLength(0);
 
-        // --- tick 2: derive from the updated ledger ---
-        const t2Pending = derivePending(desired, ledger, skipped).pending;
-        const t2Ids = t2Pending.map((w) => w.windowId);
-        // GO Jan is DONE ⇒ not pending. PY Jan failed ⇒ still pending (retry).
+        // --- tick 2: derive from the updated ledger (skipped.json stays empty) ---
+        const t2 = derivePending(desired, ledger, { windows: [] }, cap);
+        const t2Ids = t2.pending.map((w) => w.windowId);
+        // GO Jan is DONE ⇒ not pending. PY Jan hard-failed within cap ⇒ still pending.
         // Both Feb windows were deferred ⇒ still pending.
         expect(t2Ids).toContain(pyJan.windowId);
         expect(t2Ids).not.toContain(goJan.windowId);
-        expect(t2Pending).toHaveLength(3);
+        expect(t2.hardFailed).toHaveLength(0);
+        expect(t2.pending).toHaveLength(3);
 
-        const t2 = admit(
-            t2Pending,
+        const t2Admit = admit(
+            t2.pending,
             budget({ limit: 15000, remaining: 15000 }),
             config,
         );
         // cap 2 + ≤1/repo: admit PY Jan (retry) + GO Feb; PY Feb deferred.
-        expect(t2.admitted).toHaveLength(2);
-        expect(t2.admitted.map((w) => w.repo).sort()).toEqual([GO, PY]);
-        expect(t2.admitted.some((w) => w.windowId === pyJan.windowId)).toBe(
-            true,
-        );
+        expect(t2Admit.admitted).toHaveLength(2);
+        expect(t2Admit.admitted.map((w) => w.repo).sort()).toEqual([GO, PY]);
+        expect(
+            t2Admit.admitted.some((w) => w.windowId === pyJan.windowId),
+        ).toBe(true);
 
-        // PY Jan fails AGAIN ⇒ attempt 2 > retry_cap 1 ⇒ retired to skipped.
+        // PY Jan hard-fails AGAIN ⇒ attempt 2 > retry_cap 1 ⇒ reported (pacer halts).
         const r2 = reconcile(
-            t2.admitted,
-            t2.admitted
-                .filter((w) => w.repo === GO)
-                .map((w) => doneOutcome(w, "produced")),
+            t2Admit.admitted,
+            [
+                ...t2Admit.admitted
+                    .filter((w) => w.repo === GO)
+                    .map((w) => doneOutcome(w, "produced")),
+                hardOutcome(pyJan),
+            ],
             ledger,
             config,
             RECON_OPTS,
         );
-        expect(r2.newlySkipped.map((s) => s.window_id)).toContain(
+        expect(r2.hardFailures.map((s) => s.window_id)).toContain(
             pyJan.windowId,
         );
 
-        // --- tick 3: PY Jan is now skipped ⇒ never pending again ---
+        // --- tick 3: PY Jan is hard-exhausted ⇒ hardFailed, never pending again ---
         const ledger3 = [...ledger, ...r2.records];
-        const skipped3: Skipped = {
-            windows: [...skipped.windows, ...r2.newlySkipped],
-        };
-        const t3Pending = derivePending(desired, ledger3, skipped3).pending;
-        expect(t3Pending.map((w) => w.windowId)).not.toContain(pyJan.windowId);
+        const t3 = derivePending(desired, ledger3, { windows: [] }, cap);
+        expect(t3.pending.map((w) => w.windowId)).not.toContain(pyJan.windowId);
+        expect(t3.hardFailed.map((w) => w.windowId)).toContain(pyJan.windowId);
     });
 });

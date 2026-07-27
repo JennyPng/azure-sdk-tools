@@ -117,10 +117,25 @@ Defined in `ccr-improvement-loop.md`. Three stages:
   per window: `{ window_id, repo, window_start/end, cohort, outcome, attempt,
 run_id, artifact_name, ts }`. The `ledger` job downloads each leg's outcome
   artifact, reconciles, and commits records. **A missing outcome artifact is read
-  as `failed`.**
-- **Retry semantics:** `retry_cap: 1` → attempt 1 fails → retried as attempt 2 →
-  second fail → permanent `skipped.json`. A deleted ledger file re-plans that
-  window fresh (attempt 1). The `pr-*.json` cache makes re-dispatch nearly free.
+  as a `transient` failure** (the leg crashed/cancelled before emitting — infra,
+  not a bad window).
+- **Retry semantics (transient vs hard):** every `failed` record carries a
+  `failure_kind`.
+- **`transient`** (rate-limit / 5xx / timeout / depleted budget / missing
+  artifact): does NOT consume the retry budget (`attempt` is held, not bumped)
+  and the window STAYS pending, so the pacer re-dispatches it "when able". It
+  is never written to `skipped.json`.
+- **`hard`** (a genuine, classified failure — the conservative default when a
+  prep fails without a transient marker): bumps `attempt`. Once `attempt`
+  exceeds `retry_cap` the window is excluded from pending AND reported by
+  `reconcile` (`::error::`), and the next `plan` tick FAILS LOUDLY (throws) so a
+  human is notified — the pacer does NOT silently skip it. Delete the ledger
+  file to re-plan that window fresh (attempt 1). Nothing is written to
+  `skipped.json` anymore; that file is read-only legacy input.
+- The transient signal comes from a `prep-failure.json` marker that `fetch-prs`
+  / `prep-run` drop into the cache dir; the terminal post-step forwards its
+  `kind` to `emit-outcome --failure-kind`. `prep-run` clears any stale marker at
+  the start of every run. The `pr-*.json` cache makes re-dispatch nearly free.
 - Cost model (`pacer/config.json` + `pacer-schema.ts`): `est_rest_calls_per_window`
   ~1200, `est_graphql_points_per_window` ~2000, `safety_margin` 500, `retry_cap` 1.
 

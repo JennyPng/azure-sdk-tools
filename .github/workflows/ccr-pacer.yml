@@ -15,8 +15,9 @@
 #              admitted window. The loop's per-repo child concurrency group plus
 #              the ≤ 1-window/repo admission rule keep same-repo work serialized.
 #   ledger   — (if: always) download every window's outcome artifact, reconcile
-#              (missing artifact ⇒ failed; retry cap ⇒ skipped.json), and push the
-#              updated records back to `ccr-pacer-state`.
+#              (missing artifact ⇒ transient failure, retried; a hard failure past
+#              retry_cap is reported so the next plan tick fails loudly), and push
+#              the updated records back to `ccr-pacer-state`.
 #
 # `concurrency: ccr-pacer` (cancel-in-progress: false) serializes ticks so two
 # never race the state branch. Scope guards (B4): no in-job `sleep`; pace.ts
@@ -143,7 +144,8 @@ jobs:
     name: Reconcile + persist ledger
     needs: [plan, backfill]
     # Run even when a backfill leg failed: a missing outcome artifact must still
-    # be reconciled to `failed` (retryable). Skip only on empty backlog / dry-run.
+    # be reconciled to a `transient` failure (retryable). Skip only on empty
+    # backlog / dry-run.
     if: ${{ always() && needs.plan.outputs.count != '0' && !inputs.dry_run }}
     runs-on: ubuntu-latest
     permissions:

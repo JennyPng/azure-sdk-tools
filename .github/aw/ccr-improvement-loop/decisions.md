@@ -394,6 +394,42 @@ as D16.
 
 ---
 
+## D18 — Failure retries are classified `transient` vs `hard`; transient never skips
+
+**Decision.** Every `failed` ledger record carries a `failure_kind`. A
+**`transient`** failure (rate-limit / secondary-limit / 5xx / timeout / depleted
+API budget, or a missing outcome artifact from a crashed/cancelled leg) does NOT
+consume the retry budget — `attempt` is held, the window STAYS pending, and the
+pacer re-dispatches it "when able". A **`hard`** failure (the conservative default
+when a prep aborts without a transient marker) increments `attempt`; once it
+exceeds `retry_cap` the window is excluded from pending, `reconcile` reports it
+(`::error::`), and the next `plan` tick **fails loudly** (throws) to notify a
+human. Nothing is written to `skipped.json` anymore — a window is only ever
+permanently retired by deleting its ledger file by hand. The transient signal is a
+`prep-failure.json` marker that `fetch-prs`/`prep-run` drop into the cache dir and
+the terminal post-step forwards to `emit-outcome --failure-kind`.
+
+**Why.** The prior policy retired a window to `skipped.json` after `retry_cap`
+failures regardless of cause, so a purely transient installation rate-limit
+(observed on pacer runs 13/14, which retired the May window) permanently dropped
+real data from the cohort. Backfill windows are settled and finite: a transient
+infra failure should always be re-tried later, never abandoned, and the
+`pr-*.json` cache makes that re-dispatch nearly free. Conversely a genuine bug
+must not be silently skipped and hidden — surfacing it as a loud, repeating pacer
+failure forces a human to look, which is the correct default when a failure can't
+be proven transient.
+
+**Rejected alternatives.** (1) _Retry everything forever_ — a real, deterministic
+bug would loop silently and burn budget with no signal; the loud-halt on hard
+exhaustion is the notification. (2) _Keep auto-skipping but only for transient_ —
+inverts the safe default; an unclassifiable failure is more likely a bug than a
+rate-limit, so the conservative kind is `hard`. (3) _Classify by exit code alone_
+— the deterministic-prep failure surfaces through subprocess boundaries and
+`process.exit`, so a dedicated marker file (cleared at the start of every run) is
+the only reliable, forgery-resistant transient channel.
+
+---
+
 ## Cross-cutting principle
 
 Where judgment is irreducible, use the agent — on bounded evidence, with a pinned

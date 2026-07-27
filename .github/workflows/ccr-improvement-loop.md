@@ -202,11 +202,21 @@ post-steps:
       # Any failed step in the agent job ⇒ failed (retryable), overriding all.
       HARD=""
       if [ "$JOB_STATUS" != "success" ]; then HARD="--hard-failure"; fi
+      # On failure, classify transient (rate-limit / depleted budget / 5xx —
+      # deterministic prep dropped a prep-failure.json marker) vs hard (any other
+      # failure, the conservative default). The pacer keeps a transient window
+      # PENDING and re-dispatches it when budget allows; a hard failure consumes
+      # the retry cap and, once exhausted, makes the pacer fail loudly.
+      FAILKIND=""
+      if [ "$JOB_STATUS" != "success" ]; then
+        KIND=$(node -e 'try{const k=require(process.env.CCR_CACHE+"/prep-failure.json").kind;process.stdout.write(k==="transient"?"transient":"hard")}catch{process.stdout.write("hard")}')
+        FAILKIND="--failure-kind $KIND"
+      fi
       node ./scripts/emit-outcome.ts \
         --window-id "$WINDOW_ID" \
         --pr-count "$PR_COUNT" --min-prs "$MIN_PRS" \
         --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
-        --out-dir "$CCR_RUNS" $NOOP $UPLOAD $HARD
+        --out-dir "$CCR_RUNS" $NOOP $UPLOAD $HARD $FAILKIND
   - name: Upload terminal outcome
     if: always()
     uses: actions/upload-artifact@v4
