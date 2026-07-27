@@ -255,8 +255,9 @@ using the PR title (and labels/body from the matching
 (`bug-fix | feature | refactor | docs | test | chore`). Then set
 `prTypeSource: "agent"` and `classificationStatus: "complete"` on that row.
 Leave already-`complete` rows untouched. Write the updated array back to
-`${{ env.CCR_CACHE }}/classified.json` (same shape) so the Step 4 emit picks it
-up and `bugFixPrRate` reflects the true bug-fix count for the window.
+`${{ env.CCR_CACHE }}/classified.json` preserving the SAME wrapper shape —
+`{ "prs": [ ...rows... ] }`, NOT a bare `[ ... ]` array — so the Step 4 emit
+picks it up and `bugFixPrRate` reflects the true bug-fix count for the window.
 
 ## 2. Judge the comments
 
@@ -272,7 +273,9 @@ input `items` (don't judge one per turn). Apply
   replies.
 
 Use only the evidence already present in `judge-input.json` — never full-file or
-`excludedPaths` content. Write the augmented rows to `${{ env.CCR_CACHE }}/judged.json`, deriving
+`excludedPaths` content. Write the augmented rows to
+`${{ env.CCR_CACHE }}/judged.json` as a `{ "comments": [ ...rows... ] }` object
+(the same wrapper shape as `attributed.json`, NOT a bare `[ ... ]` array), deriving
 `isGap = ask && isSubstantive && diffDetectable && ccrSawCode && !ccrAddressedConcern`
 and `theme = isSubstantive ? category : null`. Leave any un-judgeable row's judge
 fields `null` with `judgeStatus: "failed"`.

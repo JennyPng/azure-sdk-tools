@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 
 import {
     buildRunJson,
@@ -6,6 +9,7 @@ import {
     ownerRepoOf,
     computeWindowId,
     canonicalizeRun,
+    readArrayShaped,
     CANONICAL_GENERATED_AT,
 } from "../scripts/emit-run-json.ts";
 import type { BuildRunInput, RunMetaInput } from "../scripts/emit-run-json.ts";
@@ -175,5 +179,36 @@ describe("emit-run-json buildRunJson", () => {
         expect(run.run.prCount).toBe(0);
         expect(run.metrics.rates.addressedRate?.value).toBeNull();
         expect(() => parseRun(run)).not.toThrow();
+    });
+});
+
+describe("readArrayShaped (agent-output shape tolerance)", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "emit-shape-"));
+    const write = (name: string, obj: unknown): string => {
+        const p = path.join(tmp, name);
+        fs.writeFileSync(p, JSON.stringify(obj));
+        return p;
+    };
+
+    it("accepts the wrapped { key: [...] } shape", () => {
+        const f = write("wrapped.json", { comments: [{ a: 1 }, { a: 2 }] });
+        expect(readArrayShaped<{ a: number }>(f, "comments")).toEqual([
+            { a: 1 },
+            { a: 2 },
+        ]);
+    });
+
+    it("accepts a bare top-level array (what the agent naturally writes)", () => {
+        const f = write("bare.json", [{ a: 1 }]);
+        expect(readArrayShaped<{ a: number }>(f, "comments")).toEqual([
+            { a: 1 },
+        ]);
+    });
+
+    it("throws a clear error when the file is neither shape", () => {
+        const f = write("bad.json", { foo: 1 });
+        expect(() => readArrayShaped(f, "prs")).toThrow(
+            /expected a JSON array or \{ "prs": \[\.\.\.\] \}/,
+        );
     });
 });

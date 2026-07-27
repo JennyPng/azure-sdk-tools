@@ -202,16 +202,11 @@ export function resolveGeneratedAt(
 // IO wiring.
 // ---------------------------------------------------------------------------
 
-interface ClassifiedFile {
-    prs: {
-        number: number;
-        prType?: PrType | null;
-        prTypeSource?: PrTypeSource;
-        classificationStatus?: "complete" | "needs-agent" | "failed";
-    }[];
-}
-interface AttributedFile {
-    comments: AttributedComment[];
+interface ClassifiedPr {
+    number: number;
+    prType?: PrType | null;
+    prTypeSource?: PrTypeSource;
+    classificationStatus?: "complete" | "needs-agent" | "failed";
 }
 
 // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters -- T is an ergonomic cast for callers
@@ -219,11 +214,32 @@ function readJson<T>(file: string): T {
     return JSON.parse(fs.readFileSync(file, "utf8")) as T;
 }
 
+/**
+ * Read an array the agent produced, tolerating BOTH the wrapped object shape
+ * (`{ "<key>": [...] }`) and a bare top-level array (`[...]`). The agent is asked
+ * to "write the augmented rows", which naturally yields a bare array; accepting
+ * either shape (instead of blindly reading `parsed[key]` and later crashing on
+ * `undefined.map`/`.filter`) makes the emit robust to that ambiguity. Throws a
+ * clear, actionable error when the file is neither shape.
+ */
+export function readArrayShaped<T>(file: string, key: string): T[] {
+    const parsed = readJson<unknown>(file);
+    if (Array.isArray(parsed)) return parsed as T[];
+    if (parsed !== null && typeof parsed === "object") {
+        const arr = (parsed as Record<string, unknown>)[key];
+        if (Array.isArray(arr)) return arr as T[];
+    }
+    throw new Error(
+        `${file}: expected a JSON array or { "${key}": [...] }, got ${
+            parsed === null ? "null" : typeof parsed
+        }`,
+    );
+}
+
+/** Like {@link readArrayShaped} but optional: missing file ⇒ empty array. */
 function readOptionalArray<T>(file: string | undefined, key: string): T[] {
     if (!file) return [];
-    const parsed = readJson<Record<string, unknown>>(file);
-    const arr = parsed[key];
-    return Array.isArray(arr) ? (arr as T[]) : [];
+    return readArrayShaped<T>(file, key);
 }
 
 function printSummary(run: RunJson): void {
@@ -291,10 +307,10 @@ function main(): void {
 
     const cfg = loadConfig(v.config);
     const meta = readJson<RunMetaInput>(v.meta);
-    const classified = readJson<ClassifiedFile>(v.classified);
-    const attributed = readJson<AttributedFile>(v.attributed);
+    const classifiedPrs = readArrayShaped<ClassifiedPr>(v.classified, "prs");
+    const comments = readArrayShaped<AttributedComment>(v.attributed, "comments");
 
-    const classByNumber = new Map(classified.prs.map((p) => [p.number, p]));
+    const classByNumber = new Map(classifiedPrs.map((p) => [p.number, p]));
     const rawFiles = [...parsed.positionals];
     if (v.glob) {
         rawFiles.push(...fs.globSync(v.glob, { withFileTypes: false }));
@@ -323,7 +339,7 @@ function main(): void {
     const run = buildRunJson({
         meta,
         prs,
-        comments: attributed.comments,
+        comments,
         themes: readOptionalArray<Theme>(v.themes, "themes"),
         proposedEdits: readOptionalArray<ProposedEdit>(
             v["proposed-edits"],
